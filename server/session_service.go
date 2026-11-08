@@ -139,12 +139,26 @@ func (s *SessionService) CloseSession(sc *uasc.SecureChannel, r ua.Request, reqI
 		return nil, err
 	}
 
-	err = s.srv.sb.Close(req.RequestHeader.AuthenticationToken)
-	if err != nil {
+	sess := s.srv.sb.Session(req.RequestHeader.AuthenticationToken)
+	if sess == nil {
 		return nil, ua.StatusBadSessionIDInvalid
 	}
 
-	//TODO: deal with 'delete subscriptions' field in request
+	// Part 4, 5.6.4: with DeleteSubscriptions set the server deletes the
+	// subscriptions owned by the session together with their monitored
+	// items. Otherwise the subscriptions stay on the server, detached from
+	// the closed session, until another session takes them over via
+	// TransferSubscriptions.
+	if req.DeleteSubscriptions {
+		s.srv.SubscriptionService.deleteSubscriptionsOfSession(sess)
+	} else {
+		s.srv.SubscriptionService.detachSubscriptionsOfSession(sess)
+	}
+
+	if err := s.srv.sb.Close(req.RequestHeader.AuthenticationToken); err != nil {
+		return nil, ua.StatusBadSessionIDInvalid
+	}
+
 	response := &ua.CloseSessionResponse{
 		ResponseHeader: responseHeader(req.RequestHeader.RequestHandle, ua.StatusOK),
 	}

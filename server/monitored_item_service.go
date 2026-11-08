@@ -97,6 +97,31 @@ func (s *MonitoredItemService) DeleteSub(id uint32) {
 	}
 }
 
+// nodesForSub returns a de-duplicated snapshot of the node ids monitored by the
+// given subscription. TransferSubscriptions uses it to push the current values
+// after a transfer with SendInitialValues.
+func (s *MonitoredItemService) nodesForSub(subID uint32) []*ua.NodeID {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+
+	items := s.Subs[subID]
+	seen := make(map[string]struct{}, len(items))
+	nodes := make([]*ua.NodeID, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.Req == nil || item.Req.ItemToMonitor == nil || item.Req.ItemToMonitor.NodeID == nil {
+			continue
+		}
+		n := item.Req.ItemToMonitor.NodeID
+		key := n.String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		nodes = append(nodes, n)
+	}
+	return nodes
+}
+
 func (s *MonitoredItemService) ChangeNotification(n *ua.NodeID) {
 
 	s.Mu.Lock()
@@ -185,7 +210,7 @@ func (s *MonitoredItemService) CreateMonitoredItems(sc *uasc.SecureChannel, r ua
 	}
 
 	sess := s.SubService.srv.Session(req.RequestHeader)
-	if sub.Session.AuthTokenID.String() != sess.AuthTokenID.String() {
+	if !sub.ownedBy(sess) {
 		return nil, errors.New("not your subscription, bro")
 	}
 
@@ -284,12 +309,12 @@ func (s *MonitoredItemService) SetMonitoringMode(sc *uasc.SecureChannel, r ua.Re
 		id := req.MonitoredItemIDs[i]
 		item, ok := s.Items[id]
 
-		if item.Sub.Session.AuthTokenID.String() != sess.AuthTokenID.String() {
-			results[i] = ua.StatusBadSessionIDInvalid
-		}
-
-		if !ok {
-			results[i] = ua.StatusBadMonitoredItemIDInvalid
+		if !ok || !item.Sub.ownedBy(sess) {
+			if !ok {
+				results[i] = ua.StatusBadMonitoredItemIDInvalid
+			} else {
+				results[i] = ua.StatusBadSessionIDInvalid
+			}
 			continue
 		}
 		item.Mode = req.MonitoringMode
@@ -346,10 +371,12 @@ func (s *MonitoredItemService) DeleteMonitoredItems(sc *uasc.SecureChannel, r ua
 		item, ok := s.Items[id]
 		if !ok {
 			results[i] = ua.StatusBadMonitoredItemIDInvalid
+			continue
 		}
 
-		if item.Sub.Session.AuthTokenID.String() != sess.AuthTokenID.String() {
+		if !item.Sub.ownedBy(sess) {
 			results[i] = ua.StatusBadSessionIDInvalid
+			continue
 		}
 
 		// this function gets the lock so we need to do it in the background so it can happen after our lock is released.
